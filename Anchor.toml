@@ -5,7 +5,7 @@ resolution = true
 skip-lint = false
 
 [programs.localnet]
-solana_presale_factory = "4YibNBFv8bChwDB43ovYCDcoy74iihN28SzEV8oNAKvN"
+solana_presale_factory = "9eNoMwnzGs7FCEMD4RscEGgfCGJmbwDme9bAKNPXjyNy"
 
 [registry]
 url = "https://api.apr.dev"

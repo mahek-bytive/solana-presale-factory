@@ -10,6 +10,8 @@ describe('solana-presale-factory', () => {
   anchor.setProvider(provider);
   const program = anchor.workspace.SolanaPresaleFactory as Program<SolanaPresaleFactory>;
 
+  console.log("Program ID:", program.programId.toString());
+
   let factory = anchor.web3.Keypair.generate();  // Create a new keypair for the factory account
   let presale = anchor.web3.Keypair.generate();  // Create a new keypair for the presale account
   let presaleVault = anchor.web3.Keypair.generate();  // Create a new keypair for the presale vault

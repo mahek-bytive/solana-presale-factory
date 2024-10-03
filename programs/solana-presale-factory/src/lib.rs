@@ -1,8 +1,8 @@
 use anchor_lang::prelude::*;
 use anchor_spl::token::{self, Mint, Token, TokenAccount, Transfer, MintTo};
-use std::mem::size_of;
+// use std::mem::size_of;
 
-declare_id!("4YibNBFv8bChwDB43ovYCDcoy74iihN28SzEV8oNAKvN");
+declare_id!("9eNoMwnzGs7FCEMD4RscEGgfCGJmbwDme9bAKNPXjyNy");
 
 #[program]
 pub mod solana_presale_factory {
@@ -46,9 +46,6 @@ pub mod solana_presale_factory {
         _qerralock: Pubkey,           // _qerralock
         _uniswap_factory: Pubkey,     // _uniswapFactory
     ) -> Result<()> {
-        let presale_key = ctx.accounts.presale.key();
-        let owner_key = ctx.accounts.owner.key();
-
         let presale = &mut ctx.accounts.presale;
 
         // Adding a debug statement
@@ -105,15 +102,7 @@ pub mod solana_presale_factory {
         let fee = (_hard_cap * factory.platform_fee) / 10_000; // Assuming platform_fee is in basis points
         presale.platform_fee = fee;
 
-        msg!("Presale created successfully with Hard Cap: {}", presale.hard_cap);
-
-        // Emit event
-        emit!(PresaleCreated {
-            presale: presale_key,
-            owner: owner_key,
-            start_sale: _start_sale,
-            end_sale: _end_sale,
-        });
+        msg!("Presale account initialized: {}", presale.key());
 
         let mint_account_info = ctx.accounts.token_mint.to_account_info();
         msg!("Token Mint Initialized: {}", mint_account_info.data_len() > 0);
@@ -227,7 +216,7 @@ pub mod solana_presale_factory {
 
 #[derive(Accounts)]
 pub struct InitializeFactory<'info> {
-    #[account(init, payer = owner, space = 8 + 48)]
+    #[account(init, payer = owner, space = 8 + Factory::MAX_SIZE)]
     pub factory: Account<'info, Factory>,
     #[account(mut)]
     pub owner: Signer<'info>,
@@ -238,7 +227,7 @@ pub struct InitializeFactory<'info> {
 pub struct CreatePresale<'info> {
     #[account(mut, has_one = owner)]
     pub factory: Account<'info, Factory>,
-    #[account(init, payer = owner, space = 8 + size_of::<Presale>())] // Adjust space as needed
+    #[account(init, payer = owner, space = 8 + Presale::MAX_SIZE)] // Adjust space as needed
     pub presale: Account<'info, Presale>,
     #[account(mut)]
     pub owner: Signer<'info>,
@@ -286,6 +275,10 @@ pub struct Factory {
     pub platform_fee: u64,      // Platform fee in basis points (e.g., 500 = 5%)
 }
 
+impl Factory {
+  pub const MAX_SIZE: usize = 32 + 8 + 8;
+}
+
 #[account]
 pub struct Presale {
     pub owner: Pubkey,
@@ -318,15 +311,17 @@ pub struct Presale {
     pub is_finalized: bool,
     pub platform_fee: u64,
     pub participants: Vec<Pubkey>,     // Whitelisted participants
-    pub buyers: Vec<(Pubkey, u64)>,
+    pub buyers: Vec<Buyer>,
 }
 
-#[event]
-pub struct PresaleCreated {
-    pub presale: Pubkey,
-    pub owner: Pubkey,
-    pub start_sale: i64,
-    pub end_sale: i64,
+impl Presale {
+  pub const MAX_SIZE: usize = (7 * 32) + (4 + 100 * 40) +  (4 + 100 * 32) + (16 * 8) + (1 * 6);
+}
+
+#[derive(AnchorSerialize, AnchorDeserialize, Clone, Debug, PartialEq)]
+pub struct Buyer {
+    pub buyer: Pubkey,
+    pub amount: u64,
 }
 
 #[error_code]
