@@ -1,10 +1,8 @@
 use anchor_lang::prelude::*;
-// use anchor_spl::token::{self, Mint, Token, TokenAccount, Transfer, InitializeMint, MintTo, Burn};
-use anchor_spl::token::{self, Mint, Token, TokenAccount, InitializeMint, MintTo};
-// use anchor_spl::token::assert_initialized;
-// use std::collections::HashSet;
+use anchor_spl::token::{self, Mint, Token, TokenAccount, Transfer, MintTo};
+use std::mem::size_of;
 
-declare_id!("AjDwp2hFQaKF6ntfiG9xmfAwsRH8vTCmbC8ydvqfYZ4q");
+declare_id!("4YibNBFv8bChwDB43ovYCDcoy74iihN28SzEV8oNAKvN");
 
 #[program]
 pub mod solana_presale_factory {
@@ -52,6 +50,11 @@ pub mod solana_presale_factory {
         let owner_key = ctx.accounts.owner.key();
 
         let presale = &mut ctx.accounts.presale;
+
+        // Adding a debug statement
+        msg!("Creating presale with owner: {}", _owner);
+        msg!("Token: {}", _token);
+        msg!("Hard Cap: {}", _hard_cap);
 
         // Validate parameters
         if _soft_cap > _hard_cap {
@@ -102,6 +105,8 @@ pub mod solana_presale_factory {
         let fee = (_hard_cap * factory.platform_fee) / 10_000; // Assuming platform_fee is in basis points
         presale.platform_fee = fee;
 
+        msg!("Presale created successfully with Hard Cap: {}", presale.hard_cap);
+
         // Emit event
         emit!(PresaleCreated {
             presale: presale_key,
@@ -110,17 +115,20 @@ pub mod solana_presale_factory {
             end_sale: _end_sale,
         });
 
-        // Check if the mint account is already initialized
-        if ctx.accounts.token_mint.supply == 0 {
-            // Mint not initialized, so initialize it
-            let cpi_accounts = InitializeMint {
-                mint: ctx.accounts.token_mint.to_account_info(),
-                rent: ctx.accounts.rent.to_account_info(),
-            };
-            let cpi_program = ctx.accounts.token_program.to_account_info();
-            let cpi_ctx = CpiContext::new(cpi_program, cpi_accounts);
-            token::initialize_mint(cpi_ctx, 9, &presale.owner, Some(&presale.owner))?;
-        }
+        let mint_account_info = ctx.accounts.token_mint.to_account_info();
+        msg!("Token Mint Initialized: {}", mint_account_info.data_len() > 0);
+
+        // // Check if the mint account is already initialized
+        // if ctx.accounts.token_mint.supply == 0 {
+        //     // Mint not initialized, so initialize it
+        //     let cpi_accounts = InitializeMint {
+        //         mint: ctx.accounts.token_mint.to_account_info(),
+        //         rent: ctx.accounts.rent.to_account_info(),
+        //     };
+        //     let cpi_program = ctx.accounts.token_program.to_account_info();
+        //     let cpi_ctx = CpiContext::new(cpi_program, cpi_accounts);
+        //     token::initialize_mint(cpi_ctx, 9, &presale.owner, Some(&presale.owner))?;
+        // }
 
         // Mint tokens to the token vault
         let cpi_accounts_mint = MintTo {
@@ -134,11 +142,92 @@ pub mod solana_presale_factory {
 
         Ok(())
     }
+
+    pub fn buy_tokens(ctx: Context<BuyTokens>, amount: u64) -> Result<()> {
+        let presale = &mut ctx.accounts.presale;
+        let clock = Clock::get()?;
+
+        // Check if presale is active
+        if clock.unix_timestamp < presale.start_sale {
+            return Err(ErrorCode::PresaleNotStarted.into());
+        }
+        if clock.unix_timestamp > presale.end_sale {
+            return Err(ErrorCode::PresaleEnded.into());
+        }
+
+        // Check if sale is finalized
+        if presale.is_finalized {
+            return Err(ErrorCode::PresaleAlreadyFinalized.into());
+        }
+
+        // Whitelist check
+        if presale.is_whitelist && !presale.participants.contains(&ctx.accounts.buyer.key()) {
+            return Err(ErrorCode::Unauthorized.into());
+        }
+
+        // Check funding cap
+        if presale.funds_raised.checked_add(amount).ok_or(ErrorCode::FundingCapExceeded)? > presale.hard_cap {
+            return Err(ErrorCode::FundingCapExceeded.into());
+        }
+
+        // Enforce min and max buy
+        if amount < presale.min_buy {
+            return Err(ErrorCode::AmountTooLow.into());
+        }
+        if amount > presale.max_buy {
+            return Err(ErrorCode::AmountTooHigh.into());
+        }
+
+        // Calculate tokens to buy
+        let tokens_to_buy = amount.checked_div(presale.presale_rate).ok_or(ErrorCode::InsufficientTokens)?;
+
+        if presale.tokens_sold + tokens_to_buy > presale.hard_cap {
+            return Err(ErrorCode::InsufficientTokens.into());
+        }
+
+        // Handle payment transfer
+        if presale.is_native {
+            // Handling native currency (e.g., SOL)
+            let cpi_accounts = anchor_lang::system_program::Transfer {
+                from: ctx.accounts.buyer.to_account_info(),
+                to: ctx.accounts.presale_vault.to_account_info(),
+            };
+            let cpi_program = ctx.accounts.system_program.to_account_info();
+            let cpi_ctx = CpiContext::new(cpi_program, cpi_accounts);
+            anchor_lang::system_program::transfer(cpi_ctx, amount)?;
+        } else {
+            // Handling SPL tokens
+            let cpi_accounts_transfer = Transfer {
+                from: ctx.accounts.buyer_payment_account.to_account_info(),
+                to: ctx.accounts.presale_payment_vault.to_account_info(),
+                authority: ctx.accounts.buyer.to_account_info(),
+            };
+            let cpi_program_transfer = ctx.accounts.token_program.to_account_info();
+            let cpi_ctx_transfer = CpiContext::new(cpi_program_transfer, cpi_accounts_transfer);
+            token::transfer(cpi_ctx_transfer, amount)?;
+        }
+
+        // Transfer tokens from token vault to buyer
+        let cpi_accounts_transfer = Transfer {
+            from: ctx.accounts.token_vault.to_account_info(),
+            to: ctx.accounts.buyer_token_account.to_account_info(),
+            authority: ctx.accounts.owner.to_account_info(),
+        };
+        let cpi_program_transfer = ctx.accounts.token_program.to_account_info();
+        let cpi_ctx_transfer = CpiContext::new(cpi_program_transfer, cpi_accounts_transfer);
+        token::transfer(cpi_ctx_transfer, tokens_to_buy)?;
+
+        // Update presale state
+        presale.tokens_sold += tokens_to_buy;
+        presale.funds_raised += amount;
+
+        Ok(())
+    }
 }
 
 #[derive(Accounts)]
 pub struct InitializeFactory<'info> {
-    #[account(init, payer = owner, space = 8 + 56)]
+    #[account(init, payer = owner, space = 8 + 48)]
     pub factory: Account<'info, Factory>,
     #[account(mut)]
     pub owner: Signer<'info>,
@@ -149,7 +238,7 @@ pub struct InitializeFactory<'info> {
 pub struct CreatePresale<'info> {
     #[account(mut, has_one = owner)]
     pub factory: Account<'info, Factory>,
-    #[account(init, payer = owner, space = 8 + 3636)] // Adjust space as needed
+    #[account(init, payer = owner, space = 8 + size_of::<Presale>())] // Adjust space as needed
     pub presale: Account<'info, Presale>,
     #[account(mut)]
     pub owner: Signer<'info>,
@@ -163,6 +252,31 @@ pub struct CreatePresale<'info> {
     pub token_program: Program<'info, Token>,
     pub rent: Sysvar<'info, Rent>,
     pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
+pub struct BuyTokens<'info> {
+    #[account(mut)]
+    pub presale: Account<'info, Presale>,
+    #[account(mut)]
+    pub buyer: Signer<'info>,
+    #[account(mut)]
+    pub owner: Signer<'info>,  // Add the owner as a signer
+    /// CHECK: Presale vault (SOL or SPL tokens)
+    #[account(mut)]
+    pub presale_vault: AccountInfo<'info>,
+    /// CHECK: Presale payment vault (for SPL tokens)
+    #[account(mut)]
+    pub presale_payment_vault: AccountInfo<'info>,
+    /// CHECK: Buyer payment token account (if not native)
+    #[account(mut)]
+    pub buyer_payment_account: AccountInfo<'info>,
+    #[account(mut)]
+    pub buyer_token_account: Account<'info, TokenAccount>,
+    #[account(mut)]
+    pub token_vault: Account<'info, TokenAccount>,
+    pub token_program: Program<'info, Token>,
+    pub system_program: Program<'info, System>, 
 }
 
 #[account]
@@ -204,6 +318,7 @@ pub struct Presale {
     pub is_finalized: bool,
     pub platform_fee: u64,
     pub participants: Vec<Pubkey>,     // Whitelisted participants
+    pub buyers: Vec<(Pubkey, u64)>,
 }
 
 #[event]
@@ -222,4 +337,28 @@ pub enum ErrorCode {
     InvalidTime,
     #[msg("Min buy must be less than or equal to max buy")]
     InvalidMinMax,
+     #[msg("Presale has not started yet.")]
+    PresaleNotStarted,
+    #[msg("Presale has already ended.")]
+    PresaleEnded,
+    #[msg("Funding cap exceeded.")]
+    FundingCapExceeded,
+    #[msg("Insufficient tokens available.")]
+    InsufficientTokens,
+    #[msg("Presale is already finalized.")]
+    PresaleAlreadyFinalized,
+    #[msg("Unauthorized access.")]
+    Unauthorized,
+    #[msg("Invalid fee percentage.")]
+    InvalidFee,
+    #[msg("Whitelist not enabled.")]
+    WhitelistNotEnabled,
+    #[msg("Amount is below the minimum purchase limit.")]
+    AmountTooLow,
+    #[msg("Amount exceeds the maximum purchase limit.")]
+    AmountTooHigh,
+    #[msg("Insufficient funds.")]
+    InsufficientFunds,
+    #[msg("Presale has not ended yet.")]
+    PresaleNotEnded,
 }
